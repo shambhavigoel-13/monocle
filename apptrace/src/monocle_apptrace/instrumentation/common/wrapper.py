@@ -14,6 +14,8 @@ from opentelemetry.trace.status import StatusCode
 from monocle_apptrace.instrumentation.common.constants import (
     ADD_NEW_WORKFLOW,
     AGENTIC_SPANS,
+    SPAN_START_TIME,
+    SPAN_END_TIME,
     WORKFLOW_TYPE_KEY,
 )
 from monocle_apptrace.instrumentation.common.scope_wrapper import monocle_trace_scope
@@ -516,7 +518,8 @@ def start_as_monocle_span(tracer: Tracer, name: str, auto_close_span: bool) -> I
     # Use tracer.start_span + manual attach instead of start_as_current_span so
     # every context token is owned by us (avoids OTel's internal context manager
     # also trying to detach() in the wrong context).
-    span = tracer.start_span(name)
+    start_time:int = get_value(SPAN_START_TIME) or None
+    span = tracer.start_span(name, start_time=start_time)
     span_token = attach(set_span_in_context(span))
     new_monocle_token = attach(set_monocle_span_in_context(span))
     original_span_token = attach(set_span_in_context(original_span))
@@ -542,7 +545,8 @@ def start_as_monocle_span(tracer: Tracer, name: str, auto_close_span: bool) -> I
             if parent_monocle_span is not None:
                 attach(set_monocle_span_in_context(parent_monocle_span))
         if auto_close_span:
-            span.end()
+            end_time:int = get_value(SPAN_END_TIME) or None
+            span.end(end_time=end_time)
 
 def get_builtin_scope_names(to_wrap) -> str:
     output_processor = None
