@@ -11,12 +11,17 @@ SessionStart and SessionEnd are dispatched immediately as standalone calls.
 """
 
 # Enable Monocle Tracing
-from monocle_apptrace.instrumentation.common.instrumentor import setup_monocle_telemetry
-setup_monocle_telemetry(workflow_name = 'claude-cli', monocle_exporters_list = 'file')
-
+import os
 import json
 import sys
 from pathlib import Path
+from monocle_apptrace.instrumentation.common.instrumentor import setup_monocle_telemetry
+
+# Read configuration from environment variables
+workflow_name = os.environ.get("MONOCLE_SERVICE_NAME", "claude-cli")
+exporters = os.environ.get("MONOCLE_EXPORTER", "file")
+
+setup_monocle_telemetry(workflow_name=workflow_name, monocle_exporters_list=exporters)
 from  monocle_apptrace.instrumentation.metamodel.claude_cli.replay_handlers import ReplayHandler
 from monocle_apptrace.instrumentation.metamodel.claude_cli.trace_events import record_trace_event, _session_log, _log
 from monocle_apptrace.instrumentation.common.constants import AGENT_SESSION, SPAN_START_TIME, SPAN_END_TIME
@@ -57,7 +62,7 @@ def replay_session(session_id: str) -> None:
     events = load_events(session_id)
     _log(f"--- Replay start: {len(events)} events for session {session_id} ---")
 
-    pending_prompt_event: dict | None = None  # UserPromptSubmit event (pre)
+    pending_prompt_event: Optional[dict] = None  # UserPromptSubmit event (pre)
     pending_tools: dict[str, dict] = {}        # tool_use_id -> PreToolUse event
     pending_tool_calls: list[dict] = []        # ordered tool calls for the current turn
     replay_handler: ReplayHandler = ReplayHandler()
