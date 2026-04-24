@@ -2,6 +2,7 @@ import sys, os
 import runpy
 from monocle_apptrace import setup_monocle_telemetry
 
+
 def main():
     # Check if running in Claude hook mode
     if len(sys.argv) >= 2 and sys.argv[1] in ("claude-hook", "claude_hook", "--claude-hook"):
