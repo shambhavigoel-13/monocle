@@ -215,4 +215,3 @@ disable = [
 
 [project.scripts]
 monocle_apptrace = "monocle_apptrace.mcp_server:main"
-monocle-install-claude = "monocle_apptrace.instrumentation.metamodel.claude_cli.installer:main"
