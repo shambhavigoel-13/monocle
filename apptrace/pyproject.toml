@@ -10,7 +10,7 @@ commands = [
 
 [project]
 name = "monocle_apptrace"
-version = "0.7.0"
+version = "0.7.0.dev1"
 authors = [
   { name="Okahu Inc.", email="okahu-pypi@okahu.ai" },
 ]
@@ -215,3 +215,4 @@ disable = [
 
 [project.scripts]
 monocle_apptrace = "monocle_apptrace.mcp_server:main"
+monocle-install-claude = "monocle_apptrace.instrumentation.metamodel.claude_cli.installer:main"

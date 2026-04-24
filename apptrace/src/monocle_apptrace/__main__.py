@@ -2,6 +2,7 @@ import sys, os
 import runpy
 from monocle_apptrace import setup_monocle_telemetry
 
+
 def main():
     if len(sys.argv) < 2 or not sys.argv[1].endswith(".py"):
         print("Usage: python -m monocle_apptrace <your-main-module-file> <args>")
@@ -15,5 +16,6 @@ def main():
         runpy.run_path(path_name=sys.argv[0], run_name="__main__")
     except Exception as e:
         print(e)
+
 if __name__ == "__main__":
     main()
