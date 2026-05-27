@@ -27,9 +27,19 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 logger = logging.getLogger(__name__)
 
+# Check if AWS S3 is configured before instantiating exporter
+S3_REGION = os.getenv("MONOCLE_S3_REGION_NAME")
+S3_BUCKET = os.getenv("MONOCLE_S3_BUCKET_NAME")
+
+if not S3_REGION or not S3_BUCKET:
+    pytest.skip(
+        "AWS S3 not configured. Set MONOCLE_S3_REGION_NAME and MONOCLE_S3_BUCKET_NAME environment variables.",
+        allow_module_level=True
+    )
+
 exporter_s3 = OpenDALS3Exporter(
-    region_name=os.getenv("MONOCLE_S3_REGION_NAME"),
-    bucket_name=os.getenv("MONOCLE_S3_BUCKET_NAME")
+    region_name=S3_REGION,
+    bucket_name=S3_BUCKET
 )
 
 @pytest.fixture(scope="module")
