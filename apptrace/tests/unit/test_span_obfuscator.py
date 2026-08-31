@@ -1,5 +1,6 @@
 """Unit tests for sensitive-data obfuscation of span exports."""
 
+import base64
 import json
 import os
 import re
@@ -14,7 +15,10 @@ from opentelemetry.trace import SpanContext, TraceFlags
 
 from monocle_apptrace.exporters.base_exporter import serialize_span
 from monocle_apptrace.exporters.span_obfuscator import (
+    BASE64_BLOB_MIN_LENGTH,
+    CREDENTIAL_PATTERNS,
     DEFAULT_PATTERNS,
+    MEDIA_PATTERNS,
     ObfuscatingSpanExporter,
     ObfuscatingSpanProcessor,
     RegexSpanObfuscator,
@@ -37,6 +41,11 @@ MOCK_ANTHROPIC_KEY = "sk-ant-api03-Zz9Yy8Xx7Ww6Vv5Uu4Tt3Ss2Rr1Qq0"
 MOCK_AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
 MOCK_GITHUB_TOKEN = "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
 MOCK_PASSWORD = "hunter2-not-a-real-password"
+
+# A stand-in for the inline image a multimodal call sends: real base64, big
+# enough to clear BASE64_BLOB_MIN_LENGTH and to land in the KB size bucket.
+MOCK_IMAGE_B64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\xde\xad\xbe\xef" * 2048).decode()
+MOCK_IMAGE_SIZE = "8KB"
 
 OBFUSCATION_ENV_VARS = (
     "MONOCLE_SPAN_OBFUSCATORS",
@@ -339,6 +348,192 @@ class TestCredentialRedaction:
 
         assert "<API_KEY>" in event_attrs(inference, "data.input")["input"]
         assert event_attrs(retrieval, "data.input")["input"] == MOCK_OPENAI_KEY
+
+
+class TestMediaRedaction:
+    """Inline media: the base64 image, audio clip or PDF a multimodal call sends."""
+
+    def test_openai_data_url_becomes_a_placeholder(self):
+        payload = json.dumps({"user": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{MOCK_IMAGE_B64}"}},
+        ]})
+        result = scrub(payload)
+
+        assert MOCK_IMAGE_B64 not in result
+        assert "<IMAGE:image/png," in result
+        assert "what is this?" in result           # the prompt text survives
+        assert json.loads(result)                  # and it is still parseable
+
+    @pytest.mark.parametrize("payload,expected_type", [
+        # Anthropic
+        ({"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                      "data": MOCK_IMAGE_B64}}, "image/png"),
+        # Gemini
+        ({"inline_data": {"mime_type": "image/jpeg", "data": MOCK_IMAGE_B64}}, "image/jpeg"),
+    ])
+    def test_bare_base64_is_replaced_and_the_media_type_survives(self, payload, expected_type):
+        result = scrub(json.dumps(payload))
+
+        assert MOCK_IMAGE_B64 not in result
+        assert "<BASE64:" in result
+        assert expected_type in result  # left readable in its own field
+
+    @pytest.mark.parametrize("media_type,expected", [
+        ("image/png", "<IMAGE:image/png,"),
+        ("image/webp", "<IMAGE:image/webp,"),
+        ("application/pdf", "<MEDIA:application/pdf,"),
+        ("audio/mpeg", "<MEDIA:audio/mpeg,"),
+    ])
+    def test_images_and_other_media_are_labelled_apart(self, media_type, expected):
+        assert scrub(f"data:{media_type};base64,{MOCK_IMAGE_B64}").startswith(expected)
+
+    def test_the_placeholder_reports_the_decoded_size(self):
+        """So a trace can still tell a thumbnail from a photo."""
+        result = scrub(f"data:image/png;base64,{MOCK_IMAGE_B64}")
+        decoded_kb = len(base64.b64decode(MOCK_IMAGE_B64)) / 1024
+
+        assert result == f"<IMAGE:image/png,{decoded_kb:.0f}KB>"
+
+    def test_an_array_of_images_is_replaced_element_by_element(self):
+        span = make_span(input_payload=[f"data:image/png;base64,{MOCK_IMAGE_B64}",
+                                        f"data:image/webp;base64,{MOCK_IMAGE_B64}"])
+        payload = event_attrs(obfuscate_span(span, [RegexSpanObfuscator()]), "data.input")
+
+        assert payload["input"] == [f"<IMAGE:image/png,{MOCK_IMAGE_SIZE}>",
+                                    f"<IMAGE:image/webp,{MOCK_IMAGE_SIZE}>"]
+
+    def test_the_payload_shrinks_by_orders_of_magnitude(self):
+        payload = json.dumps({"image_url": {"url": f"data:image/png;base64,{MOCK_IMAGE_B64}"}})
+        assert len(scrub(payload)) < len(payload) / 100
+
+    @pytest.mark.parametrize("text", [
+        "Describe the image in three sentences",
+        "The file is data:image/png but no payload followed",
+        " ".join("word" for _ in range(400)),      # long, but broken by spaces
+        "A" * (BASE64_BLOB_MIN_LENGTH - 1),        # long, but under the threshold
+    ])
+    def test_leaves_ordinary_text_alone(self, text):
+        assert scrub(text) == text
+
+    @pytest.mark.parametrize("secret,expected", [
+        (MOCK_OPENAI_KEY, "<API_KEY>"),
+        (MOCK_GITHUB_TOKEN, "<API_KEY>"),
+        (MOCK_AWS_KEY, "<AWS_ACCESS_KEY>"),
+    ])
+    def test_credentials_keep_their_own_marker(self, secret, expected):
+        """Credential shapes run first, so none is mislabelled as base64."""
+        assert scrub(secret) == expected
+
+    def test_is_idempotent(self):
+        once = scrub(f"data:image/png;base64,{MOCK_IMAGE_B64}")
+        assert scrub(once) == once
+
+    def test_can_be_narrowed_out(self):
+        obfuscator = RegexSpanObfuscator(patterns=list(CREDENTIAL_PATTERNS))
+        payload = f"data:image/png;base64,{MOCK_IMAGE_B64}"
+
+        assert scrub(payload, obfuscator) == payload
+
+    def test_media_and_credential_patterns_partition_the_built_ins(self):
+        assert set(MEDIA_PATTERNS) | set(CREDENTIAL_PATTERNS) == set(DEFAULT_PATTERNS)
+        assert not set(MEDIA_PATTERNS) & set(CREDENTIAL_PATTERNS)
+
+
+class TestCredentialKeyRedaction:
+    """The `credential_key` pattern: redacting on the payload key, not the text.
+
+    Only a custom output processor produces such a key -- `SpanHandler` flattens
+    an accessor's dict straight into the payload.
+    """
+
+    @staticmethod
+    def scrub_key(key, text=MOCK_PASSWORD, obfuscator=None):
+        """Run one string through an obfuscator as the value of *key*."""
+        return (obfuscator or RegexSpanObfuscator()).obfuscate_text(
+            text, key, "data.output", make_span()
+        )
+
+    @pytest.mark.parametrize("key", [
+        "api_key", "apikey", "api-key", "openai_api_key", "x-api-key",
+        "password", "passwd", "pwd", "user_password", "db.password",
+        "secret", "client_secret", "access_token", "refresh_token",
+        "credential", "credentials", "authorization", "private_key",
+        "API_KEY", "Password",  # the key match is case-insensitive
+        # Any prefix is allowed, so a flag naming a credential is redacted too.
+        # Fail-closed: the name alone cannot tell it from "user_password".
+        "has_credentials",
+    ])
+    def test_redacts_a_bare_secret_under_a_credential_key(self, key):
+        assert self.scrub_key(key) == "<REDACTED>"
+
+    @pytest.mark.parametrize("key", [
+        "input", "response", "error_code", "status", "role", "tool_name",
+        # A credential word must *end* the key; these only describe one.
+        "password_hint", "secret_name", "api_key_id", "authorization_required",
+    ])
+    def test_leaves_values_under_other_keys_alone(self, key):
+        assert self.scrub_key(key) == MOCK_PASSWORD
+
+    def test_a_recognized_shape_keeps_its_precise_marker(self):
+        """A key match must not degrade <API_KEY> into a generic <REDACTED>."""
+        assert self.scrub_key("api_key", MOCK_OPENAI_KEY) == "<API_KEY>"
+        assert self.scrub_key("access_token", "eyJhbGciOi.eyJzdWIiOi.SflKxwRJSM") == "<JWT>"
+
+    def test_redacts_a_value_only_partly_recognized(self):
+        """The key says the whole value is the secret, not just the part matched."""
+        result = self.scrub_key("api_key", f"{MOCK_OPENAI_KEY} and also {MOCK_PASSWORD}")
+
+        assert result == "<REDACTED>"
+        assert MOCK_PASSWORD not in result
+
+    @pytest.mark.parametrize("text", ["", "   ", "<REDACTED>", "<API_KEY>"])
+    def test_blank_and_already_redacted_values_are_left_alone(self, text):
+        assert self.scrub_key("api_key", text) == text
+
+    def test_is_idempotent(self):
+        once = self.scrub_key("api_key")
+        assert self.scrub_key("api_key", once) == once
+
+    def test_can_be_narrowed_out(self):
+        obfuscator = RegexSpanObfuscator(patterns=["credential_assignment"])
+        assert self.scrub_key("api_key", obfuscator=obfuscator) == MOCK_PASSWORD
+
+    def test_selecting_it_alone_skips_the_text_patterns(self):
+        obfuscator = RegexSpanObfuscator(patterns=["credential_key"])
+
+        assert self.scrub_key("api_key", obfuscator=obfuscator) == "<REDACTED>"
+        assert self.scrub_key("response", MOCK_OPENAI_KEY, obfuscator) == MOCK_OPENAI_KEY
+
+    def test_end_to_end_on_a_custom_processor_payload(self):
+        span = ReadableSpan(
+            name="test.span",
+            context=SpanContext(trace_id=0x1234, span_id=0x5678, is_remote=False,
+                                trace_flags=TraceFlags(1)),
+            attributes={"span.type": "inference"},
+            events=[Event("data.output", {
+                "response": "connected",
+                "api_key": MOCK_PASSWORD,
+                "password": "s3cr3t-p4ss",
+            }, timestamp=1)],
+            resource=Resource.create({}),
+        )
+        result = obfuscate_span(span, [RegexSpanObfuscator()])
+        payload = event_attrs(result, "data.output")
+
+        assert payload["api_key"] == "<REDACTED>"
+        assert payload["password"] == "<REDACTED>"
+        assert payload["response"] == "connected"
+        assert MOCK_PASSWORD not in json.dumps(serialize_span(result))
+
+    def test_the_key_names_match_the_assignment_pattern_names(self):
+        """Both patterns read one shared list, so they cannot drift apart."""
+        key_regex, _ = DEFAULT_PATTERNS["credential_key"]
+        assignment_regex, _ = DEFAULT_PATTERNS["credential_assignment"]
+
+        for key in ("api_key", "password", "client_secret", "authorization"):
+            assert key_regex.match(key), key
+            assert assignment_regex.search(f"{key}=abc123def456"), key
 
 
 class TestPatternSelection:
