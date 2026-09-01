@@ -44,7 +44,7 @@ that configure telemetry in stages.
 ### `RegexSpanObfuscator`
 
 The default. No extra packages, cheap enough to run on every span. Covers PEM private keys, JWTs,
-bearer tokens, AWS/OpenAI/Anthropic/Google/GitHub/Slack keys, and a `credential_assignment`
+bearer tokens, AWS/OpenAI/Anthropic/Google/GitHub/Slack/Okahu keys, and a `credential_assignment`
 catch-all that redacts the value of any `api_key`/`password`/`client_secret`-style assignment in
 `key=value`, `key: value` and `"key": "value"` form — preserving the quotes, so a redacted JSON
 payload stays parseable. `DEFAULT_PATTERNS` in

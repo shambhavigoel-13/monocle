@@ -40,6 +40,7 @@ MOCK_OPENAI_KEY = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
 MOCK_ANTHROPIC_KEY = "sk-ant-api03-Zz9Yy8Xx7Ww6Vv5Uu4Tt3Ss2Rr1Qq0"
 MOCK_AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
 MOCK_GITHUB_TOKEN = "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+MOCK_OKAHU_KEY = "okh_A1b2C3d4_E5f6G7h8I9j0K1l2M3n4"
 MOCK_PASSWORD = "hunter2-not-a-real-password"
 
 # A stand-in for the inline image a multimodal call sends: real base64, big
@@ -273,6 +274,7 @@ class TestCredentialRedaction:
         ("AIzaSyA12345678901234567890123456789012", "<API_KEY>"),
         (MOCK_GITHUB_TOKEN, "<API_KEY>"),
         ("xoxb-1234567890-abcdefg", "<API_KEY>"),
+        (MOCK_OKAHU_KEY, "<API_KEY>"),
         ("Authorization: Bearer abcdef1234567890", "Bearer <TOKEN>"),
         ("eyJhbGciOi.eyJzdWIiOi.SflKxwRJSM", "<JWT>"),
         ("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAK\n-----END RSA PRIVATE KEY-----",
@@ -295,6 +297,15 @@ class TestCredentialRedaction:
     ])
     def test_the_secret_value_is_gone(self, secret, template):
         assert secret not in scrub(template.format(secret))
+
+    def test_a_positional_argument_is_redacted_by_shape_alone(self):
+        """A key passed positionally has no name beside it, so only its shape
+        can give it away -- the `{"args": [...]}` a traced method records."""
+        payload = json.dumps({"args": ["t_0c7a35", MOCK_OKAHU_KEY, None], "kwargs": {}})
+        result = scrub(payload)
+
+        assert MOCK_OKAHU_KEY not in result
+        assert json.loads(result)["args"][1] == "<API_KEY>"
 
     @pytest.mark.parametrize("text,expected", [
         # An unquoted value runs to the next delimiter, which must not swallow the

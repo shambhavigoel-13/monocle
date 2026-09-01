@@ -262,6 +262,9 @@ DEFAULT_PATTERNS: Dict[str, Any] = {
     "google_api_key": (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "<API_KEY>"),
     "github_token": (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}\b"), "<API_KEY>"),
     "slack_token": (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "<API_KEY>"),
+    # Monocle exports to Okahu, so its key is the one most likely to reach a
+    # span -- and, passed positionally, the one no other pattern can name.
+    "okahu_api_key": (re.compile(r"\bokh_[A-Za-z0-9_-]{16,}\b"), "<API_KEY>"),
     # The inline image, audio clip or PDF a multimodal call sends, as OpenAI's
     # image_url/input_image blocks carry it.
     "data_url": (
