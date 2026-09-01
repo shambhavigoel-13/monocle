@@ -52,6 +52,8 @@ OBFUSCATION_ENV_VARS = (
     "MONOCLE_SPAN_OBFUSCATORS",
     "MONOCLE_OBFUSCATE_SPAN_TYPES",
     "MONOCLE_DISABLE_SPAN_OBFUSCATION",
+    "MONOCLE_OBFUSCATE_ENV_VALUES",
+    "MONOCLE_OBFUSCATE_EXTRA_PATTERNS",
 )
 
 
@@ -877,6 +879,90 @@ class TestConfiguration:
         with patch.dict(os.environ, {"MONOCLE_SPAN_OBFUSCATORS": "regex"}):
             set_span_obfuscators(None)
             assert get_span_obfuscators() is get_span_obfuscators()
+
+    def _obfuscators_with(self, env):
+        with patch.dict(os.environ, env, clear=False):
+            clear_obfuscation_env()
+            for key, value in env.items():
+                os.environ[key] = value
+            set_span_obfuscators(None)
+            return get_span_obfuscators()
+
+    def _scrub_with(self, env, text):
+        result = text
+        for obfuscator in self._obfuscators_with(env):
+            result = obfuscator.obfuscate_text(result, "input", "data.input", make_span())
+        return result
+
+    def test_env_var_values_are_redacted_literally(self):
+        """The app already holds its secrets, so no regex has to describe them."""
+        result = self._scrub_with(
+            {"CORP_TOKEN": "s3cr3t-corp-token-value",
+             "MONOCLE_OBFUSCATE_ENV_VALUES": "CORP_TOKEN"},
+            "called with s3cr3t-corp-token-value positionally",
+        )
+        assert result == "called with <REDACTED> positionally"
+
+    def test_a_missing_env_var_is_skipped_with_a_warning(self, caplog):
+        with caplog.at_level("WARNING"):
+            result = self._scrub_with(
+                {"MONOCLE_OBFUSCATE_ENV_VALUES": "NEVER_SET_ANYWHERE"}, "text stays"
+            )
+
+        assert result == "text stays"
+        assert "NEVER_SET_ANYWHERE" in caplog.text
+
+    def test_a_short_env_value_is_skipped_with_a_warning(self, caplog):
+        """A var set to "1" would otherwise blank that digit out of every span."""
+        with caplog.at_level("WARNING"):
+            result = self._scrub_with(
+                {"DEBUG_FLAG": "1", "MONOCLE_OBFUSCATE_ENV_VALUES": "DEBUG_FLAG"},
+                "1 of 3 retries",
+            )
+
+        assert result == "1 of 3 retries"
+        assert "DEBUG_FLAG" in caplog.text
+
+    @pytest.mark.parametrize("spec,text,expected", [
+        ('{"corp": "CORP-[0-9]{6}"}', "id CORP-123456", "id <REDACTED>"),
+        ('{"badge": {"pattern": "BDG-[0-9]{4}", "replacement": "<BADGE>"}}',
+         "badge BDG-9876", "badge <BADGE>"),
+    ])
+    def test_extra_patterns_are_read_from_env(self, spec, text, expected):
+        assert self._scrub_with({"MONOCLE_OBFUSCATE_EXTRA_PATTERNS": spec}, text) == expected
+
+    @pytest.mark.parametrize("spec", [
+        "not json at all",
+        '["a", "list"]',            # JSON, but not an object
+        '{"broken": "CORP-[0-9"}',  # not a valid regex
+        '{"wrongtype": 5}',
+    ])
+    def test_bad_extra_pattern_config_is_skipped_with_a_warning(self, spec, caplog):
+        with caplog.at_level("WARNING"):
+            result = self._scrub_with(
+                {"MONOCLE_OBFUSCATE_EXTRA_PATTERNS": spec}, "ordinary text"
+            )
+
+        assert result == "ordinary text"
+        assert "MONOCLE_OBFUSCATE_EXTRA_PATTERNS" in caplog.text
+
+    def test_env_patterns_do_not_disturb_the_built_ins(self):
+        assert self._scrub_with(
+            {"MONOCLE_OBFUSCATE_EXTRA_PATTERNS": '{"corp": "CORP-[0-9]{6}"}'},
+            f"key {MOCK_OPENAI_KEY} and CORP-123456",
+        ) == "key <API_KEY> and <REDACTED>"
+
+    def test_env_patterns_apply_even_without_the_regex_obfuscator(self):
+        """Configuring a pattern has to mean it is applied, whatever else is on."""
+        obfuscators = self._obfuscators_with({
+            "CORP_TOKEN": "s3cr3t-corp-token-value",
+            "MONOCLE_OBFUSCATE_ENV_VALUES": "CORP_TOKEN",
+            "MONOCLE_SPAN_OBFUSCATORS": f"{UpperObfuscator.__module__}:UpperObfuscator",
+        })
+
+        # First, so a literal value is matched before anything rewrites the text.
+        assert isinstance(obfuscators[0], RegexSpanObfuscator)
+        assert isinstance(obfuscators[1], UpperObfuscator)
 
     def test_exporter_factory_returns_concrete_exporter_types(self):
         """Obfuscation attaches to processors, so exporter types stay intact."""

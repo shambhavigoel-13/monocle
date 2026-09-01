@@ -18,6 +18,7 @@ See docs/monocle_span_obfuscation.md for configuration and examples.
 """
 
 import copy
+import json
 import logging
 import os
 import re
@@ -39,6 +40,12 @@ logger = logging.getLogger(__name__)
 SPAN_OBFUSCATORS_ENV = "MONOCLE_SPAN_OBFUSCATORS"
 OBFUSCATE_SPAN_TYPES_ENV = "MONOCLE_OBFUSCATE_SPAN_TYPES"
 DISABLE_OBFUSCATION_ENV = "MONOCLE_DISABLE_SPAN_OBFUSCATION"
+OBFUSCATE_ENV_VALUES_ENV = "MONOCLE_OBFUSCATE_ENV_VALUES"
+EXTRA_PATTERNS_ENV = "MONOCLE_OBFUSCATE_EXTRA_PATTERNS"
+
+#: Shortest env var value redacted literally. A var set to "1" or "true" would
+#: otherwise blank that text out of every span.
+MIN_ENV_VALUE_LENGTH = 8
 
 OBFUSCATION_OFF_VALUES = ("none", "off", "false", "no", "0", "disabled")
 
@@ -603,6 +610,9 @@ BUILTIN_OBFUSCATORS: Dict[str, Any] = {
     "presidio": lambda **kw: PresidioSpanObfuscator(**kw),
 }
 
+#: Names that build a RegexSpanObfuscator, the one that accepts extra patterns.
+REGEX_OBFUSCATOR_NAMES = ("credentials", "regex")
+
 #: What is enabled when nothing is configured. Obfuscation is on by default.
 DEFAULT_OBFUSCATOR_NAME = "credentials"
 
@@ -647,6 +657,91 @@ def obfuscation_disabled_by_env() -> bool:
     return os.environ.get(SPAN_OBFUSCATORS_ENV, "").strip().lower() in OBFUSCATION_OFF_VALUES
 
 
+def _patterns_from_env_values() -> Dict[str, Any]:
+    """Patterns redacting the literal values of the env vars named by
+    ``MONOCLE_OBFUSCATE_ENV_VALUES``.
+
+    An app already holds its own secrets, so this needs no regex and catches
+    them wherever they land -- including a positional argument, where no name
+    identifies them. Values are never logged.
+    """
+    names = [
+        name.strip()
+        for name in os.environ.get(OBFUSCATE_ENV_VALUES_ENV, "").split(",")
+        if name.strip()
+    ]
+    patterns: Dict[str, Any] = {}
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if not value:
+            logger.warning(
+                "%s names '%s', which is not set; skipping it.",
+                OBFUSCATE_ENV_VALUES_ENV, name,
+            )
+            continue
+        if len(value) < MIN_ENV_VALUE_LENGTH:
+            logger.warning(
+                "Value of '%s' is shorter than %d characters; skipping it rather "
+                "than redacting that text out of every span.",
+                name, MIN_ENV_VALUE_LENGTH,
+            )
+            continue
+        patterns[f"env:{name}"] = (re.compile(re.escape(value)), "<REDACTED>")
+    return patterns
+
+
+def _patterns_from_env_json() -> Dict[str, Any]:
+    """Patterns from ``MONOCLE_OBFUSCATE_EXTRA_PATTERNS``, a JSON object of
+    ``{"name": "regex"}`` or ``{"name": {"pattern": ..., "replacement": ...}}``.
+
+    JSON rather than a delimited list because regexes contain the commas and
+    colons such a list would split on.
+    """
+    raw = os.environ.get(EXTRA_PATTERNS_ENV, "").strip()
+    if not raw:
+        return {}
+    try:
+        spec = json.loads(raw)
+    except ValueError as ex:
+        logger.warning("%s is not valid JSON: %s. Ignoring it.", EXTRA_PATTERNS_ENV, ex)
+        return {}
+    if not isinstance(spec, dict):
+        logger.warning(
+            "%s must be a JSON object of {name: regex}, got %s. Ignoring it.",
+            EXTRA_PATTERNS_ENV, type(spec).__name__,
+        )
+        return {}
+
+    patterns: Dict[str, Any] = {}
+    for name, entry in spec.items():
+        if isinstance(entry, str):
+            pattern, replacement = entry, "<REDACTED>"
+        elif isinstance(entry, dict):
+            pattern = entry.get("pattern")
+            replacement = entry.get("replacement", "<REDACTED>")
+        else:
+            pattern = None
+        if not isinstance(pattern, str) or not isinstance(replacement, str):
+            logger.warning(
+                "%s entry '%s' must be a regex string or {\"pattern\": ..., "
+                "\"replacement\": ...}; skipping it.", EXTRA_PATTERNS_ENV, name,
+            )
+            continue
+        try:
+            patterns[name] = (re.compile(pattern), replacement)
+        except re.error as ex:
+            logger.warning(
+                "%s entry '%s' is not a valid regex: %s. Skipping it.",
+                EXTRA_PATTERNS_ENV, name, ex,
+            )
+    return patterns
+
+
+def extra_patterns_from_env() -> Dict[str, Any]:
+    """Every ``{name: (regex, replacement)}`` configured through the environment."""
+    return {**_patterns_from_env_values(), **_patterns_from_env_json()}
+
+
 def _load_obfuscators_from_env() -> List[SpanObfuscator]:
     """Build obfuscators from the environment.
 
@@ -671,25 +766,48 @@ def _load_obfuscators_from_env() -> List[SpanObfuscator]:
         else [DEFAULT_OBFUSCATOR_NAME]
     )
 
+    extra_patterns = extra_patterns_from_env()
+
     obfuscators: List[SpanObfuscator] = []
     for entry in entries:
         try:
-            obfuscators.append(_instantiate_obfuscator(entry, span_types))
+            obfuscators.append(
+                _instantiate_obfuscator(entry, span_types, extra_patterns)
+            )
         except Exception as ex:
             logger.warning(
                 "Unable to load Monocle span obfuscator '%s': %s. "
                 "Spans will be exported without it.", entry, ex,
             )
+
+    # Env-configured patterns ride on the regex obfuscator. If none was selected
+    # -- MONOCLE_SPAN_OBFUSCATORS=presidio, say -- add one carrying only those,
+    # so configuring a pattern always means it is applied. It goes first: a
+    # literal env value must be matched before another obfuscator rewrites the
+    # text out from under it.
+    if extra_patterns and not any(
+        isinstance(obf, RegexSpanObfuscator) for obf in obfuscators
+    ):
+        obfuscators.insert(
+            0,
+            RegexSpanObfuscator(
+                patterns=[], extra_patterns=extra_patterns, span_types=span_types
+            ),
+        )
     return obfuscators
 
 
 def _instantiate_obfuscator(
-    entry: str, span_types: Optional[Sequence[str]]
+    entry: str,
+    span_types: Optional[Sequence[str]],
+    extra_patterns: Optional[Dict[str, Any]] = None,
 ) -> SpanObfuscator:
     """Build one obfuscator from a built-in name or a ``module:ClassName`` path."""
     kwargs = {"span_types": span_types} if span_types else {}
     factory = BUILTIN_OBFUSCATORS.get(entry.lower())
     if factory is not None:
+        if extra_patterns and entry.lower() in REGEX_OBFUSCATOR_NAMES:
+            kwargs["extra_patterns"] = extra_patterns
         return factory(**kwargs)
     return _import_obfuscator(entry, span_types)
 
