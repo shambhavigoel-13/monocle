@@ -284,6 +284,66 @@ monocle_trace_asserter.called_agents(min_count=5, max_count=15)  # Between 5-15 
 monocle_trace_asserter.called_tools(max_count=20)  # At most 20 tool calls total
 ```
 
+#### Any-of selectors
+
+When more than one route through the run is acceptable — the supervisor may book
+a flight *or* a train — assert the set rather than one name. `called_any_agent`
+and `called_any_tool` pass when **any** of the names was called, and narrow the
+context to every matched entity's spans (in trace order), so the checks that
+follow see the whole set:
+
+```python
+# Either specialist may have handled it
+monocle_trace_asserter.called_any_agent("flight_agent", "train_agent")
+
+# Either booking tool, called by that agent
+monocle_trace_asserter.called_any_tool("book_flight", "book_train",
+                                       agent_name="travel_agent")
+
+# Names built programmatically: pass the list itself
+monocle_trace_asserter.called_any_agent(ALLOWED_WORKERS)
+
+# Chain onto the matched spans as with any selector
+monocle_trace_asserter \
+    .called_any_tool("search_web", "search_docs") \
+    .contains_any_output("Mumbai", "Delhi")
+```
+
+Counts constrain the **total** invocations across the named entities, not the
+number of distinct ones called:
+
+```python
+# The two search tools were used at most 3 times between them
+monocle_trace_asserter.called_any_tool("search_web", "search_docs", max_count=3)
+
+# Some worker ran at least twice
+monocle_trace_asserter.called_any_agent("worker_a", "worker_b", min_count=2)
+```
+
+The negatives are the mirror: `does_not_call_any_agent` / `does_not_call_any_tool`
+fail if **any** of the names ran, which is how a set of forbidden routes is
+stated. The failure names what actually ran, not the whole candidate list:
+
+```python
+# A read-only question must not book anything
+monocle_trace_asserter.does_not_call_any_tool("book_flight", "book_hotel")
+
+# ...and must not reach the privileged agents
+monocle_trace_asserter.does_not_call_any_agent(PRIVILEGED_AGENTS)
+
+# Scoped to one caller: these tools may run, just not from this agent
+monocle_trace_asserter.does_not_call_any_tool("delete_record", "update_record",
+                                              agent_name="reporting_agent")
+```
+
+Like the other negatives, they select nothing, so the spans in scope are
+unchanged for whatever you chain next.
+
+To assert that *every* named entity was called, use `called_agent` /
+`called_tool` per name, or drive them from a
+[test case](#test-cases-as-data-fluenttestcase) with `called_agent(testcase=...)`
+— any-of selectors take names only and reject `testcase=`.
+
 #### Scope, attribute, and event assertions
 
 Assert on monocle scopes, span attributes, and span events. `has_scope`, `has_attribute`, and `has_event` narrow the context to matching spans:
@@ -1160,9 +1220,13 @@ Configure the asserter before running assertions. These methods return `self` fo
 | Method | Description |
 |---|---|
 | `called_tool(tool_name, agent_name=None, count=None, min_count=None, max_count=None, testcase=None)` | Assert a tool was called; narrows context to those spans. Optional: `count` for exact count, `min_count`/`max_count` for range. `testcase=` asserts every tool the [test case](#test-cases-as-data-fluenttestcase) names and records each one's spans |
+| `called_any_tool(*tool_names, agent_name=None, count=None, min_count=None, max_count=None)` | Assert at least one of the named tools was called; narrows context to every matched tool's spans. Names may be passed separately or as one list. `count`/`min_count`/`max_count` constrain the TOTAL calls across them |
 | `does_not_call_tool(tool_name, agent_name=None)` | Assert a tool was NOT called |
+| `does_not_call_any_tool(*tool_names, agent_name=None)` | Assert NONE of the named tools was called; one call to any of them fails it. Names may be passed separately or as one list |
 | `called_agent(agent_name, count=None, min_count=None, max_count=None, testcase=None)` | Assert an agent was called; narrows context to those spans. Optional: `count` for exact count, `min_count`/`max_count` for range. `testcase=` asserts every agent the [test case](#test-cases-as-data-fluenttestcase) names and records each one's spans |
+| `called_any_agent(*agent_names, count=None, min_count=None, max_count=None)` | Assert at least one of the named agents was called; narrows context to every matched agent's spans. Names may be passed separately or as one list. `count`/`min_count`/`max_count` constrain the TOTAL invocations across them |
 | `does_not_call_agent(agent_name)` | Assert an agent was NOT called |
+| `does_not_call_any_agent(*agent_names)` | Assert NONE of the named agents was called; one invocation of any of them fails it. Names may be passed separately or as one list |
 | `called_agents(count=None, min_count=None, max_count=None)` | Assert total number of agent invocations across all agents. Optional: `count` for exact count, `min_count`/`max_count` for range |
 | `called_tools(count=None, min_count=None, max_count=None)` | Assert total number of tool invocations across all tools. Optional: `count` for exact count, `min_count`/`max_count` for range |
 
