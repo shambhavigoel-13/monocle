@@ -132,7 +132,7 @@ def test_root_route_with_response_body_is_exported_by_default():
     ("", "https://sre-agent-stage.okahu.co/"),
 ])
 def test_configured_root_route_is_sampled_out(monkeypatch, route, url):
-    """A kubernetes httpGet probe on / answering with a body, once / is opted in."""
+    """A health probe on / answering with a body, once / is opted in."""
     monkeypatch.setattr(HttpSpanHandler, "health_check_routes", ["/healthz", "/"])
     assert sample_count(lambda: FakeSpan(route=route, url=url, response="OK")) == 1
 

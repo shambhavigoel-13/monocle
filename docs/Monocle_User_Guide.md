@@ -257,8 +257,8 @@ ending in one of those, eg `/actuator/health`). Health checks that **fail** are 
 a failure is never sampled away.
 
 The root path `/` is deliberately **not** a default health check route, because plenty of apps serve
-real traffic there. Kubernetes `httpGet` probes and cloud load balancers do often probe `/` though,
-so if yours does — and it answers with a body, which is what stops it from being sampled as an
+real traffic there. Infrastructure health probes and load balancers do often probe `/` though, so if
+yours does — and it answers with a body, which is what stops it from being sampled as an
 empty-response health check — add `/` to the route list to opt in. Requests to `/` that carry query
 params or a body are still exported, since those mean a real caller.
 
@@ -269,7 +269,7 @@ export MONOCLE_SAMPLE_HEALTH_CHECKS=false
 # replace the health check routes above with your own comma separated list
 export MONOCLE_HEALTH_CHECK_ROUTES=/health,/status-check
 
-# treat GET / as a health check too, eg for a kubernetes probe on the root path
+# treat GET / as a health check too, eg for a health probe on the root path
 export MONOCLE_HEALTH_CHECK_ROUTES=/health,/healthz,/livez,/readyz,/ping,/
 ```
 
